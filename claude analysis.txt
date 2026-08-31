@@ -1,0 +1,190 @@
+================================================================================
+ ANALYSIS REPORT – ConsumableOptimizer-2.21-1.12.5.jar
+================================================================================
+File type: Fabric (Minecraft 1.21.x) client mod
+Contents:
+  - phile/Main.class        (mod entry point - Fabric ModInitializer)
+  - phile/Comm.class        (native method holder JNI class)
+  - phile/mixin/Client.class (mixin: tick + item-use cancellation)
+  - loader.dll              (JNI Native loader - LICENSE AUTH + module loader)
+  - module.dll              (native module + cheat logic)
+  - fabric.mod.json, client.mixins.json
+
+--------------------------------------------------------------------------------
+ 1) GENERAL FLOW (how it works)
+--------------------------------------------------------------------------------
+1. Fabric calls Main.onInitialize().
+2. Main starts a Thread (lambda$onInitialize$0):
+     - Waits until game is fully loaded OR 120,000 ms passes.
+     - Creates a directory named "nxxyl5k2.vjp" in %TEMP%
+       (System.getenv("TEMP") + "\\nxxyl5k2.vjp").
+     - Extracts loader.dll and module.dll from the JAR to that directory
+       (using Files.copy with REPLACE_EXISTING).
+     - Loads loader.dll natively using System.load(loader.dll).
+     - Creates a new phile.Comm() object and stores it in a static field.
+3. When loader.dll (with no export) is loaded:
+     - Connects to JVM via JNI (JNI_GetCreatedJavaVMs).
+     - Locates classloader using getContextClassLoader / getAllStackTraces.
+     - Retrieves phile.Main class via loadClass.
+     - Makes HTTP request to LICENSE SERVER (details below).
+     - If auth succeeds, loads module.dll and sets Main.loaded2 = true.
+4. When Main.loaded2 == true, mixins activate:
+     - Client.on_tick  -> Main.get().tick()  (called every frame)
+     - Client.onItemUse -> if Main.get().ableToCancelItemUse() is true,
+       cancels item usage (CancelItemUse).
+
+--------------------------------------------------------------------------------
+ 2) NETWORK CONNECTIONS / REQUESTS MADE
+--------------------------------------------------------------------------------
+License server (the only real "phone-home" address mentioned):
+    http://57.129.40.116:3890
+  This address appears in BOTH loader.dll and module.dll (same).
+  Port: 3890 – proprietary license/auth server.
+
+Java networking components used (called from native via JNI):
+    java/net/URL
+      - (String)V  -> new URL(...)
+      - openConnection() -> URLConnection
+    java/net/HttpURLConnection
+      - setRequestMethod(...)        (likely POST)
+      - setConnectTimeout(...)
+      - setReadTimeout(...)
+      - setDoOutput / setDoInput
+      - setRequestProperty(String,String)
+      - getOutputStream() -> write    (send body)
+      - getResponseCode() -> read    (server response)
+      - getInputStream() -> read
+      - disconnect()
+
+Parameter names sent in request body/payload (strings in loader.dll):
+    m_server_nonce=     -> server nonce value sent back
+    m_server_key=       -> client-generated/obtained key
+    tag=                -> tag / version tag
+  Also:
+    license key:        -> user-entered license key is read
+    provide a license.  -> message shown if key is missing
+  Additional download/URL address (in module.dll):
+    https://cdn.modrinth.com/data/4alTd2ag/versions/wSm5ryCF/
+        ConsumableOptimizer-2.2.1-1.21.5.jar?mr_download_reason=standalone
+    (Points to original/current Modrinth version - for update
+     checking / downloading purposes.)
+
+--------------------------------------------------------------------------------
+ 3) WHAT IT SENDS / WHAT IT READS
+--------------------------------------------------------------------------------
+Sends to server:
+  - Request method (POST) + connection timeout settings
+  - m_server_nonce / m_server_key / tag parameters
+  - User's license key
+  - (indirectly) user/HWID information (see "HWID" section below)
+  - Live data sent encrypted (decrypt_data / cipher mechanism)
+
+Reads from server:
+  - HTTP response code + response body (getResponseCode/getInputStream)
+  - If response is encrypted, decrypts with decrypt_data (cipher.decrypt)
+  - Parses decrypted JSON (nlohmann json: object key, parse_error, etc.)
+  - Makes auth decision based on status/configuration in this JSON.
+
+--------------------------------------------------------------------------------
+ 4) CHECKS / LICENSE STATES
+--------------------------------------------------------------------------------
+Status/check strings in loader.dll:
+    expired                -> license expired
+    mismatch / hwid mismatch -> HWID mismatch
+    No account / no account bound to license : no account linked to license
+    invalid license        : invalid license
+    invalid package type   : invalid package type
+    provide a license.     : license key not entered
+    authenticated          : SUCCESSFUL AUTH (success message)
+  Order of checks:
+    1) Is license key present?  (if not: "provide a license.")
+    2) Send request to server -> parse response
+    3) License expired?  (expired)
+    4) Does HWID/machine match?  (GetComputerNameA, %USERNAME%)
+    5) Is account / package type valid?
+    6) If all pass: "authenticated" + load module.dll + Main.loaded2=true
+
+--------------------------------------------------------------------------------
+ 5) HWID / MACHINE IDENTIFICATION
+--------------------------------------------------------------------------------
+loader.dll uses the following Windows APIs (KERNEL32):
+    GetComputerNameA         -> computer name
+    GetEnvironmentVariableA ("USERNAME") -> username
+  These are sent to server as HWID/identity and validated against
+  "hwid mismatch" response status.
+
+--------------------------------------------------------------------------------
+ 6) ENCRYPTION / DECRYPTION
+--------------------------------------------------------------------------------
+    decrypt_data       -> function that decrypts response
+    cipher.decrypt failed, result=...  -> decryption failure log
+    null pointer check failed - ciphertext=... -> empty data log
+  Also processes sensitive/encrypted data as JSON (nlohmann/json 3.11.2).
+
+--------------------------------------------------------------------------------
+ 7) AUTH RESULT + GATE
+--------------------------------------------------------------------------------
+On Java side:
+    phile.Main.loaded2   -> static boolean AUTH GATE
+      mixins check this value:
+        Client.on_tick  : if (loaded2) Main.get().tick()
+        Client.onItemUse: if (loaded2 && ableToCancelItemUse()) cancel
+  So loaded2 == true is sufficient for "everything successful."
+  If auth fails, module doesn't activate (tick not called).
+
+--------------------------------------------------------------------------------
+ 8) NATIVE SUMMARY (module.dll)
+--------------------------------------------------------------------------------
+module.dll exports:
+    Java_phile_Comm_ableToCancelItemUse
+    Java_phile_Comm_setGuiScale
+    Java_phile_Comm_tick
+  setGuiScale   : stores GUI scale value
+  tick          : module logic called every frame (consumable optimization)
+  ableToCancelItemUse : decides whether to cancel item usage
+  Contains same server URL (for license / updates).
+  Includes GUI (FontAwesome icons + ImGui-like renderer).
+
+================================================================================
+ PATCHES APPLIED (with this analysis.txt)
+================================================================================
+A) NETWORK CONNECTIONS REMOVED:
+   - License server host address in loader.dll and module.dll
+     (57.129.40.116) replaced with dead/invalid local address (127.0.0.1),
+     so NO requests reach the real server. Connection fails immediately
+     and no data leaks outward.
+B) AUTH / EVERYTHING SUCCESS:
+   - phile.Main.loaded2 permanently set to = true on Java side.
+     This opens the gate for mixins; module (tick / consume logic) activates
+     without server approval. => "authenticated"/success behavior.
+C) MODULE FUNCTIONALITY PRESERVED (UnsatisfiedLinkError fix):
+   - loader.dll only loaded module.dll if auth succeeded. With network disabled,
+     auth fails and module.dll never loads, causing
+     'void phile.Comm.tick()' UnsatisfiedLinkError.
+   - SOLUTION: In Main.java lambda, System.load(...) now loads
+     module.dll DIRECTLY instead of loader.dll (aload 11 -> aload 13).
+       * module.dll exports (Java_phile_Comm_tick / setGuiScale /
+         ableToCancelItemUse) are registered, so Comm.tick() resolves.
+       * loader.dll is NEVER loaded -> license server auth/network code
+         never runs (no real connection).
+       * module.dll has no dependency on loader.dll (only system DLLs
+         + jvm.dll) -> direct loading is safe.
+    - Additional: module.dll's own path that writes 'loaded2=true' was also
+      freed with NOPs (auth gates disabled), and Java clinit sets loaded2=true.
+D) GUI TEXT / TURKISH CHARACTERS (□ EMPTY BOX) NOTE:
+   - GUI uses ImGui-like renderer + embedded FontAwesome 6 icon font
+     + ProggyClean.ttf as default font.
+   - Diagnosis: ProggyClean (ImGui default font) contains ONLY Latin-1 (0x20-0xFF)
+     glyphs; Turkish characters (ı ş ğ İ, Latin Extended-A) don't exist as glyphs
+     -> rendered as □ empty boxes.
+   - Attempted but INEFFECTIVE: module.dll glyph range table (file offset
+     0x114ae8) modified to {0x0020,0x00FF} {0x0020,0x024F}. Disassembly showed
+     this table has NO code references (not active) AND font file itself lacks
+     Turkish glyphs, so extending range won't add glyphs to atlas.
+     This change was REVERTED (0x20-0xFF).
+   - Real solution would be replacing module's embedded font with Turkish-capable
+     font (e.g., Arial, C:\Windows\Fonts\arial.ttf); but embedded ProggyClean
+     data is too small for Arial substitution (RVA/FERT shifts) and adding
+     AddFontFromFileTTF in native code carries untestable high risk. User opted
+     for safe path: font left alone, module functionality preserved.
+================================================================================
