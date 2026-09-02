@@ -1,5 +1,6 @@
 # xyla
 random $200 client that doesnt bypass anything , proof that its the latest one
+c2 addy -> 57.129.40.116 port -> 3890
 <img width="586" height="132" alt="image" src="https://github.com/user-attachments/assets/f2c8d8d0-8f5f-4a2d-99c0-12976f5e1b4a" />
 
 # reason
